@@ -1,0 +1,18 @@
+# Timezone for logging and timestamps. eg:"Asia/Shanghai"
+timezone: 'Asia/Shanghai'
+
+# Terms used in status messages
+singular_term: 'player'
+plural_term: 'players'
+
+discord:
+  token: 'YOUR_DISCORD_BOT_TOKEN'
+  channel_id: 'YOUR_DISCORD_CHANNEL_ID'
+
+teamspeak:
+  server_ip: 'TEAMSPEAK_SERVER_IP'
+  query_port: 10011  # Default query port
+  server_port: 9987 # Default server port
+  username: 'SERVER_QUERY_USERNAME'
+  password: 'SERVER_QUERY_PASSWORD'
+  bot_nickname: 'BotNickname'  # Nickname to ignore in user lists

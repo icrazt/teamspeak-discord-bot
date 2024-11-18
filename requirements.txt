@@ -1,0 +1,4 @@
+discord.py
+ts3
+PyYAML
+moment

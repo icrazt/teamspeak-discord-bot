@@ -44,35 +44,41 @@ last_channel_name_user_count = -1
 # Global TeamSpeak client
 ts_client = None
 previous_active_users = set()
+tasks_started = False
 
 
 async def connect_to_teamspeak():
-    try:
-        log_with_timestamp("Connecting to TeamSpeak server...")
-        global ts_client
-        ts_client = ts3.query.TS3Connection(cfg['teamspeak']['server_ip'], cfg['teamspeak']['query_port'])
-        ts_client.login(
-            client_login_name=cfg['teamspeak']['username'],
-            client_login_password=cfg['teamspeak']['password']
-        )
-        ts_client.use(sid=1)
-        log_with_timestamp("Connected to TeamSpeak server.")
-    except Exception as e:
-        log.error(f"Failed to connect to TeamSpeak: {e}")
-        exit(1)
+    #增加重连机制
+    global ts_client
+    while True:
+        try:
+            log_with_timestamp("Connecting to TeamSpeak server...")
+            ts_client = ts3.query.TS3Connection(cfg['teamspeak']['server_ip'], cfg['teamspeak']['query_port'])
+            ts_client.login(
+                client_login_name=cfg['teamspeak']['username'],
+                client_login_password=cfg['teamspeak']['password']
+            )
+            ts_client.use(sid=1)
+            log_with_timestamp("Connected to TeamSpeak server.")
+            break  # 连接成功，跳出循环
+        except Exception as e:
+            log.error(f"Failed to connect to TeamSpeak: {e}. Retrying in 10 seconds...")
+            await asyncio.sleep(10)
 
 
 async def get_active_users_from_teamspeak():
+    # fix: 使用线程池执行同步操作，并处理连接失效
+    loop = asyncio.get_running_loop()
     try:
-        client_list = ts_client.clientlist()
+        client_list = await loop.run_in_executor(None, ts_client.clientlist)
         active_users = [client for client in client_list if client['client_type'] == '0' and client['client_nickname'] != cfg['teamspeak']['bot_nickname']]
         active_user_nicknames = [user['client_nickname'] for user in active_users]
         active_user_ids = [user['clid'] for user in active_users]
         return active_users, active_user_nicknames, active_user_ids
     except Exception as e:
         log.error(f"Failed to retrieve TeamSpeak user count: {e}")
+        await connect_to_teamspeak()
         return [], [], []
-
 
 @tasks.loop(seconds=10)
 async def monitor_user_changes():
@@ -108,7 +114,7 @@ async def update_channel_name_periodically():
 
         channel = bot.get_channel(int(CHANNEL_ID))
         if channel:
-            new_name = f"{'nobody-on-ts' if user_count == 0 else f'✅{user_count}-on-ts'}"
+            new_name = 'nobody-on-ts' if user_count == 0 else f'✅{user_count}-on-ts'
             await channel.edit(name=new_name)
             log_with_timestamp(f"Updated channel name to '{new_name}'.")
             last_channel_name_user_count = user_count
@@ -126,8 +132,9 @@ async def update_presence_periodically():
         if user_count == last_presence_user_count:
             return
 
-        status = f"{'0' if user_count == 0 else f'✅{user_count}'} {plural_term} on TeamSpeak"
-        await bot.change_presence(activity=discord.CustomActivity(name=status))
+        status = '0' if user_count == 0 else f'✅{user_count}'
+        status_message = f"{status} {plural_term} on TeamSpeak"
+        await bot.change_presence(activity=discord.CustomActivity(name=status_message))
         log_with_timestamp(f"Updated presence with {user_count} {plural_term}.")
         last_presence_user_count = user_count
     except Exception as e:
@@ -136,10 +143,14 @@ async def update_presence_periodically():
 
 @bot.event
 async def on_ready():
+    global tasks_started
     log_with_timestamp(f"Logged in as {bot.user}! Starting periodic updates...")
-    update_channel_name_periodically.start()
-    update_presence_periodically.start()
-    monitor_user_changes.start()
+    if not tasks_started:
+        update_channel_name_periodically.start()
+        update_presence_periodically.start()
+        monitor_user_changes.start()
+        tasks_started = True
+        log_with_timestamp("Periodic tasks started.")
     await tree.sync()
     log_with_timestamp("Slash commands synced.")
 
@@ -185,3 +196,8 @@ if __name__ == '__main__':
         if ts_client:
             ts_client.quit()
         exit(0)
+    except Exception as e:
+        log.error(f"Unexpected error: {e}")
+        if ts_client:
+            ts_client.quit()
+        exit(1)

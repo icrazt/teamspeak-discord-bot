@@ -14,17 +14,20 @@ with open('config.yaml', 'r') as file:
 
 # Logging setup
 log_filename = 'teamspeak_bot.log'
-logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s', datefmt='%Y-%m-%dT%H:%M:%S%z', handlers=[
-    logging.FileHandler(log_filename),
-    logging.StreamHandler()
-])
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(message)s',
+    datefmt='%Y-%m-%dT%H:%M:%S%z',
+    handlers=[
+        logging.FileHandler(log_filename),
+        logging.StreamHandler()
+    ]
+)
 log = logging.getLogger(__name__)
-
 
 def log_with_timestamp(message):
     timestamp = moment.now().timezone(cfg['timezone']).strftime('%Y-%m-%dT%H:%M:%S%z')
     log.info(f'{message}')
-
 
 # Configuration
 singular_term = cfg['singular_term']
@@ -41,44 +44,51 @@ tree = bot.tree
 last_presence_user_count = -1
 last_channel_name_user_count = -1
 
-# Global TeamSpeak client
+# Global TeamSpeak client and lock
 ts_client = None
+ts_lock = asyncio.Lock()
 previous_active_users = set()
 tasks_started = False
 
-
 async def connect_to_teamspeak():
-    #增加重连机制
     global ts_client
     while True:
         try:
             log_with_timestamp("Connecting to TeamSpeak server...")
-            ts_client = ts3.query.TS3Connection(cfg['teamspeak']['server_ip'], cfg['teamspeak']['query_port'])
-            ts_client.login(
+            ts_conn = ts3.query.TS3Connection(cfg['teamspeak']['server_ip'], cfg['teamspeak']['query_port'])
+            ts_conn.login(
                 client_login_name=cfg['teamspeak']['username'],
                 client_login_password=cfg['teamspeak']['password']
             )
-            ts_client.use(sid=1)
+            ts_conn.use(sid=1)
+            async with ts_lock:
+                ts_client = ts_conn
             log_with_timestamp("Connected to TeamSpeak server.")
             break  # 连接成功，跳出循环
         except Exception as e:
             log.error(f"Failed to connect to TeamSpeak: {e}. Retrying in 10 seconds...")
             await asyncio.sleep(10)
 
-
 async def get_active_users_from_teamspeak():
-    # fix: 使用线程池执行同步操作，并处理连接失效
-    loop = asyncio.get_running_loop()
-    try:
-        client_list = await loop.run_in_executor(None, ts_client.clientlist)
-        active_users = [client for client in client_list if client['client_type'] == '0' and client['client_nickname'] != cfg['teamspeak']['bot_nickname']]
-        active_user_nicknames = [user['client_nickname'] for user in active_users]
-        active_user_ids = [user['clid'] for user in active_users]
-        return active_users, active_user_nicknames, active_user_ids
-    except Exception as e:
-        log.error(f"Failed to retrieve TeamSpeak user count: {e}")
-        await connect_to_teamspeak()
-        return [], [], []
+    async with ts_lock:
+        if ts_client is None:
+            log.error("TeamSpeak client is not connected.")
+            return [], [], []
+        try:
+            loop = asyncio.get_running_loop()
+            client_list = await loop.run_in_executor(None, ts_client.clientlist)
+            active_users = [
+                client for client in client_list
+                if client['client_type'] == '0' and client['client_nickname'] != cfg['teamspeak']['bot_nickname']
+            ]
+            active_user_nicknames = [user['client_nickname'] for user in active_users]
+            active_user_ids = [user['clid'] for user in active_users]
+            return active_users, active_user_nicknames, active_user_ids
+        except Exception as e:
+            log.error(f"Failed to retrieve TeamSpeak user count: {e}")
+            # 尝试重连
+            await connect_to_teamspeak()
+            return [], [], []
 
 @tasks.loop(seconds=10)
 async def monitor_user_changes():
@@ -101,7 +111,6 @@ async def monitor_user_changes():
     except Exception as e:
         log.error(f"Failed to monitor user changes: {e}")
 
-
 @tasks.loop(minutes=5)
 async def update_channel_name_periodically():
     try:
@@ -121,7 +130,6 @@ async def update_channel_name_periodically():
     except Exception as e:
         log.error(f"Failed to fetch or update channel name: {e}")
 
-
 @tasks.loop(seconds=10)
 async def update_presence_periodically():
     try:
@@ -140,20 +148,19 @@ async def update_presence_periodically():
     except Exception as e:
         log.error(f"Failed to update presence: {e}")
 
-
 @bot.event
 async def on_ready():
     global tasks_started
     log_with_timestamp(f"Logged in as {bot.user}! Starting periodic updates...")
     if not tasks_started:
+        await connect_to_teamspeak()  # 确保在启动任务前连接
+        monitor_user_changes.start()
         update_channel_name_periodically.start()
         update_presence_periodically.start()
-        monitor_user_changes.start()
         tasks_started = True
         log_with_timestamp("Periodic tasks started.")
     await tree.sync()
     log_with_timestamp("Slash commands synced.")
-
 
 @tree.command(name='online', description='List current online TeamSpeak users')
 async def online(interaction: discord.Interaction):
@@ -168,7 +175,6 @@ async def online(interaction: discord.Interaction):
         await interaction.response.send_message("Unable to retrieve the list of online players.", ephemeral=True)
         log.error(f"Error retrieving online players for {interaction.user}: {e}")
 
-
 @tree.command(name='online_ids', description='List current online TeamSpeak user IDs')
 async def online_ids(interaction: discord.Interaction):
     try:
@@ -182,11 +188,8 @@ async def online_ids(interaction: discord.Interaction):
         await interaction.response.send_message("Unable to retrieve the list of online player IDs.", ephemeral=True)
         log.error(f"Error retrieving online player IDs for {interaction.user}: {e}")
 
-
 async def main():
-    await connect_to_teamspeak()
     await bot.start(DISCORD_TOKEN)
-
 
 if __name__ == '__main__':
     try:
